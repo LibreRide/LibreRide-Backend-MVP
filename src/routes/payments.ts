@@ -2,6 +2,24 @@ import Stripe from 'stripe';
 import type { Env } from '../types';
 import { json } from '../lib/http';
 
+type RideType = 'regular' | 'xl' | 'premium' | 'premium_xl';
+
+type FareBreakdown = {
+  rideType?: RideType;
+  rideTypeLabel?: string;
+  requestedCapacity?: number;
+  baseFareCents?: number;
+  perMileCents?: number;
+  perMinuteCents?: number;
+  mileageFareCents?: number;
+  timeFareCents?: number;
+  subtotalFareCents?: number;
+  minimumFareCents?: number;
+  demandMultiplier?: number;
+  demandAdjustmentCents?: number;
+  totalFareCents?: number;
+};
+
 function toFiniteNumber(value: unknown): number | null {
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? numberValue : null;
@@ -17,6 +35,36 @@ function isValidLongitude(value: number | null): value is number {
 
 function isZeroCoordinate(lat: number, lng: number): boolean {
   return Math.abs(lat) < 0.000001 && Math.abs(lng) < 0.000001;
+}
+
+function normalizeRideType(value: unknown): RideType {
+  if (typeof value !== 'string') return 'regular';
+
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace('-', '_')
+    .replace(' ', '_');
+
+  if (normalized === 'xl') return 'xl';
+  if (normalized === 'premium') return 'premium';
+  if (normalized === 'premium_xl') return 'premium_xl';
+
+  return 'regular';
+}
+
+function getRequestedCapacity(rideType: RideType, value: unknown): number {
+  const requestedCapacity = toFiniteNumber(value);
+
+  if (requestedCapacity && requestedCapacity >= 1 && requestedCapacity <= 8) {
+    return Math.round(requestedCapacity);
+  }
+
+  if (rideType === 'xl' || rideType === 'premium_xl') {
+    return 6;
+  }
+
+  return 4;
 }
 
 function getAppSuccessUrl(rideId: string): string {
@@ -84,6 +132,12 @@ export async function createPrepaidRideCheckout(
     destinationLat?: number;
     destinationLng?: number;
     amountCents?: number;
+    rideType?: string;
+    rideTypeLabel?: string;
+    requestedCapacity?: number;
+    estimatedDistanceMiles?: number;
+    estimatedDurationMinutes?: number;
+    fareBreakdown?: FareBreakdown;
   };
 
   if (
@@ -94,6 +148,16 @@ export async function createPrepaidRideCheckout(
   ) {
     return json(
       { error: 'riderId, pickupAddress, destinationAddress, and amountCents are required' },
+      400,
+      env
+    );
+  }
+
+  const amountCents = Math.round(Number(body.amountCents));
+
+  if (!Number.isFinite(amountCents) || amountCents < 100) {
+    return json(
+      { error: 'A valid ride fare is required before payment.' },
       400,
       env
     );
@@ -121,6 +185,28 @@ export async function createPrepaidRideCheckout(
   const destinationLat = toFiniteNumber(body.destinationLat) ?? 25.7617;
   const destinationLng = toFiniteNumber(body.destinationLng) ?? -80.1918;
 
+  const rideType = normalizeRideType(body.rideType);
+  const requestedCapacity = getRequestedCapacity(rideType, body.requestedCapacity);
+  const estimatedDistanceMiles = toFiniteNumber(body.estimatedDistanceMiles);
+  const estimatedDurationMinutes = toFiniteNumber(body.estimatedDurationMinutes);
+
+  const fareBreakdown = {
+    ...(body.fareBreakdown || {}),
+    rideType,
+    rideTypeLabel:
+      body.rideTypeLabel ||
+      body.fareBreakdown?.rideTypeLabel ||
+      (rideType === 'premium_xl'
+        ? 'Premium XL'
+        : rideType === 'premium'
+          ? 'Premium'
+          : rideType === 'xl'
+            ? 'XL'
+            : 'Regular'),
+    requestedCapacity,
+    totalFareCents: amountCents,
+  };
+
   const rideResponse = await fetch(`${env.SUPABASE_URL}/rest/v1/rides`, {
     method: 'POST',
     headers: {
@@ -140,10 +226,15 @@ export async function createPrepaidRideCheckout(
       pickup_lng: pickupLng,
       destination_lat: destinationLat,
       destination_lng: destinationLng,
-      estimated_fare_cents: body.amountCents,
+      estimated_distance_miles: estimatedDistanceMiles,
+      estimated_duration_minutes: estimatedDurationMinutes,
+      estimated_fare_cents: amountCents,
       payment_status: 'pending',
       dispatched_driver_ids: [],
       dispatch_radius_miles: 10,
+      ride_type: rideType,
+      requested_capacity: requestedCapacity,
+      fare_breakdown: fareBreakdown,
     }),
   });
 
@@ -175,10 +266,10 @@ export async function createPrepaidRideCheckout(
         price_data: {
           currency: 'usd',
           product_data: {
-            name: 'LibreRide Ride Payment',
+            name: `LibreRide ${fareBreakdown.rideTypeLabel} Ride Payment`,
             description: `${body.pickupAddress} to ${body.destinationAddress}`,
           },
-          unit_amount: body.amountCents,
+          unit_amount: amountCents,
         },
         quantity: 1,
       },
@@ -187,6 +278,11 @@ export async function createPrepaidRideCheckout(
       ride_id: ride.id,
       rider_id: body.riderId,
       type: 'prepaid_ride',
+      ride_type: rideType,
+      requested_capacity: String(requestedCapacity),
+      estimated_distance_miles: estimatedDistanceMiles !== null ? String(estimatedDistanceMiles) : '',
+      estimated_duration_minutes: estimatedDurationMinutes !== null ? String(estimatedDurationMinutes) : '',
+      amount_cents: String(amountCents),
     },
     success_url: getAppSuccessUrl(ride.id),
     cancel_url: getAppCancelUrl(ride.id),
