@@ -2,6 +2,31 @@ import Stripe from 'stripe';
 import type { Env } from '../types';
 import { json } from '../lib/http';
 
+function toFiniteNumber(value: unknown): number | null {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? numberValue : null;
+}
+
+function isValidLatitude(value: number | null): value is number {
+  return value !== null && value >= -90 && value <= 90;
+}
+
+function isValidLongitude(value: number | null): value is number {
+  return value !== null && value >= -180 && value <= 180;
+}
+
+function isZeroCoordinate(lat: number, lng: number): boolean {
+  return Math.abs(lat) < 0.000001 && Math.abs(lng) < 0.000001;
+}
+
+function getAppSuccessUrl(rideId: string): string {
+  return `https://app.libreride.com/?payment=success&ride_id=${rideId}`;
+}
+
+function getAppCancelUrl(rideId: string): string {
+  return `https://app.libreride.com/?payment=cancelled&ride_id=${rideId}`;
+}
+
 export async function createRideCheckout(
   request: Request,
   env: Env
@@ -38,8 +63,8 @@ export async function createRideCheckout(
       ride_id: body.rideId,
       type: 'ride_payment',
     },
-    success_url: `https://app.libreride.com/payment-success?ride_id=${body.rideId}`,
-    cancel_url: `https://app.libreride.com/payment-cancelled?ride_id=${body.rideId}`,
+    success_url: getAppSuccessUrl(body.rideId),
+    cancel_url: getAppCancelUrl(body.rideId),
   });
 
   return json({ url: session.url }, 200, env);
@@ -74,10 +99,27 @@ export async function createPrepaidRideCheckout(
     );
   }
 
-  const pickupLat = Number.isFinite(body.pickupLat) ? body.pickupLat : 25.7959;
-  const pickupLng = Number.isFinite(body.pickupLng) ? body.pickupLng : -80.2906;
-  const destinationLat = Number.isFinite(body.destinationLat) ? body.destinationLat : 25.7617;
-  const destinationLng = Number.isFinite(body.destinationLng) ? body.destinationLng : -80.1918;
+  const pickupLat = toFiniteNumber(body.pickupLat);
+  const pickupLng = toFiniteNumber(body.pickupLng);
+
+  if (!isValidLatitude(pickupLat) || !isValidLongitude(pickupLng)) {
+    return json(
+      { error: 'Valid pickup GPS location is required before payment.' },
+      400,
+      env
+    );
+  }
+
+  if (isZeroCoordinate(pickupLat, pickupLng)) {
+    return json(
+      { error: 'Pickup GPS location is invalid. Please refresh your GPS and try again.' },
+      400,
+      env
+    );
+  }
+
+  const destinationLat = toFiniteNumber(body.destinationLat) ?? 25.7617;
+  const destinationLng = toFiniteNumber(body.destinationLng) ?? -80.1918;
 
   const rideResponse = await fetch(`${env.SUPABASE_URL}/rest/v1/rides`, {
     method: 'POST',
@@ -146,8 +188,8 @@ export async function createPrepaidRideCheckout(
       rider_id: body.riderId,
       type: 'prepaid_ride',
     },
-    success_url: `https://app.libreride.com/payment-success?ride_id=${ride.id}`,
-    cancel_url: `https://app.libreride.com/payment-cancelled?ride_id=${ride.id}`,
+    success_url: getAppSuccessUrl(ride.id),
+    cancel_url: getAppCancelUrl(ride.id),
   });
 
   await fetch(`${env.SUPABASE_URL}/rest/v1/rides?id=eq.${ride.id}`, {
