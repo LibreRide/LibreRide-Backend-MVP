@@ -1,11 +1,24 @@
 import type { Env } from '../types';
 import { json } from '../lib/http';
 
+type RideType = 'regular' | 'xl' | 'premium' | 'premium_xl';
+
 type EstimateRequestBody = {
   pickupAddress?: string;
   destinationAddress?: string;
   pickupLat?: number;
   pickupLng?: number;
+  rideType?: string;
+};
+
+type RideTypePricing = {
+  rideType: RideType;
+  label: string;
+  capacity: number;
+  baseFareCents: number;
+  perMileCents: number;
+  perMinuteCents: number;
+  minimumFareCents: number;
 };
 
 type MapboxFeature = {
@@ -35,6 +48,45 @@ type MapboxDirectionsResponse = {
   }>;
 };
 
+const RIDE_TYPE_PRICING: Record<RideType, RideTypePricing> = {
+  regular: {
+    rideType: 'regular',
+    label: 'Regular',
+    capacity: 4,
+    baseFareCents: 400,
+    perMileCents: 135,
+    perMinuteCents: 15,
+    minimumFareCents: 800,
+  },
+  xl: {
+    rideType: 'xl',
+    label: 'XL',
+    capacity: 6,
+    baseFareCents: 700,
+    perMileCents: 205,
+    perMinuteCents: 25,
+    minimumFareCents: 1400,
+  },
+  premium: {
+    rideType: 'premium',
+    label: 'Premium',
+    capacity: 4,
+    baseFareCents: 1000,
+    perMileCents: 325,
+    perMinuteCents: 38,
+    minimumFareCents: 2200,
+  },
+  premium_xl: {
+    rideType: 'premium_xl',
+    label: 'Premium XL',
+    capacity: 6,
+    baseFareCents: 1200,
+    perMileCents: 365,
+    perMinuteCents: 45,
+    minimumFareCents: 2800,
+  },
+};
+
 function toFiniteNumber(value: unknown): number | null {
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? numberValue : null;
@@ -52,18 +104,62 @@ function isZeroCoordinate(lat: number, lng: number): boolean {
   return Math.abs(lat) < 0.000001 && Math.abs(lng) < 0.000001;
 }
 
-function calculateFareCents(distanceMiles: number, durationMinutes: number): number {
-  const baseFareCents = 500;
-  const perMileCents = 225;
-  const perMinuteCents = 35;
-  const minimumFareCents = 800;
+function normalizeRideType(value: string | undefined): RideType {
+  if (!value) return 'regular';
 
-  const calculatedFare =
-    baseFareCents +
-    distanceMiles * perMileCents +
-    durationMinutes * perMinuteCents;
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace('-', '_')
+    .replace(' ', '_');
 
-  return Math.max(minimumFareCents, Math.round(calculatedFare));
+  if (normalized === 'xl') return 'xl';
+  if (normalized === 'premium') return 'premium';
+  if (normalized === 'premium_xl') return 'premium_xl';
+
+  return 'regular';
+}
+
+function calculateFare(
+  distanceMiles: number,
+  durationMinutes: number,
+  pricing: RideTypePricing
+): {
+  baseFareCents: number;
+  mileageFareCents: number;
+  timeFareCents: number;
+  subtotalFareCents: number;
+  minimumFareCents: number;
+  demandMultiplier: number;
+  demandAdjustmentCents: number;
+  totalFareCents: number;
+} {
+  const mileageFareCents = Math.round(distanceMiles * pricing.perMileCents);
+  const timeFareCents = Math.round(durationMinutes * pricing.perMinuteCents);
+
+  const subtotalFareCents =
+    pricing.baseFareCents + mileageFareCents + timeFareCents;
+
+  const fareBeforeDemand = Math.max(
+    pricing.minimumFareCents,
+    subtotalFareCents
+  );
+
+  // Demand multiplier will be added later. Keep it 1.00 for now.
+  const demandMultiplier = 1;
+  const totalFareCents = Math.round(fareBeforeDemand * demandMultiplier);
+  const demandAdjustmentCents = totalFareCents - fareBeforeDemand;
+
+  return {
+    baseFareCents: pricing.baseFareCents,
+    mileageFareCents,
+    timeFareCents,
+    subtotalFareCents,
+    minimumFareCents: pricing.minimumFareCents,
+    demandMultiplier,
+    demandAdjustmentCents,
+    totalFareCents,
+  };
 }
 
 function getFeatureCoordinates(feature: MapboxFeature): { lat: number; lng: number } | null {
@@ -121,7 +217,10 @@ async function geocodeDestination(
     permanent: 'true',
   });
 
-  const response = await fetch(`https://api.mapbox.com/search/geocode/v6/forward?${params.toString()}`);
+  const response = await fetch(
+    `https://api.mapbox.com/search/geocode/v6/forward?${params.toString()}`
+  );
+
   const data = await response.json() as MapboxGeocodeResponse;
 
   if (!response.ok || !data.features || data.features.length === 0) {
@@ -211,6 +310,9 @@ export async function estimateRide(request: Request, env: Env): Promise<Response
     );
   }
 
+  const rideType = normalizeRideType(body.rideType);
+  const pricing = RIDE_TYPE_PRICING[rideType];
+
   const destination = await geocodeDestination(
     body.destinationAddress,
     pickupLat,
@@ -242,9 +344,10 @@ export async function estimateRide(request: Request, env: Env): Promise<Response
     );
   }
 
-  const estimatedFareCents = calculateFareCents(
+  const fare = calculateFare(
     route.distanceMiles,
-    route.durationMinutes
+    route.durationMinutes,
+    pricing
   );
 
   return json(
@@ -257,13 +360,31 @@ export async function estimateRide(request: Request, env: Env): Promise<Response
       destinationLng: destination.lng,
       distanceMiles: Number(route.distanceMiles.toFixed(2)),
       estimatedMinutes: Math.max(1, Math.round(route.durationMinutes)),
-      estimatedFareCents,
-      estimatedFareDollars: Number((estimatedFareCents / 100).toFixed(2)),
+      estimatedFareCents: fare.totalFareCents,
+      estimatedFareDollars: Number((fare.totalFareCents / 100).toFixed(2)),
+      rideType: pricing.rideType,
+      rideTypeLabel: pricing.label,
+      requestedCapacity: pricing.capacity,
+      fareBreakdown: {
+        rideType: pricing.rideType,
+        rideTypeLabel: pricing.label,
+        requestedCapacity: pricing.capacity,
+        baseFareCents: fare.baseFareCents,
+        perMileCents: pricing.perMileCents,
+        perMinuteCents: pricing.perMinuteCents,
+        mileageFareCents: fare.mileageFareCents,
+        timeFareCents: fare.timeFareCents,
+        subtotalFareCents: fare.subtotalFareCents,
+        minimumFareCents: fare.minimumFareCents,
+        demandMultiplier: fare.demandMultiplier,
+        demandAdjustmentCents: fare.demandAdjustmentCents,
+        totalFareCents: fare.totalFareCents,
+      },
       pricing: {
-        baseFareCents: 500,
-        perMileCents: 225,
-        perMinuteCents: 35,
-        minimumFareCents: 800,
+        baseFareCents: pricing.baseFareCents,
+        perMileCents: pricing.perMileCents,
+        perMinuteCents: pricing.perMinuteCents,
+        minimumFareCents: pricing.minimumFareCents,
       },
     },
     200,
