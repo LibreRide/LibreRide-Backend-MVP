@@ -38,8 +38,8 @@ export async function createRideCheckout(
       ride_id: body.rideId,
       type: 'ride_payment',
     },
-success_url: `https://app.libreride.com/payment-success?ride_id=${body.rideId}`,
-cancel_url: `https://app.libreride.com/payment-cancelled?ride_id=${body.rideId}`,
+    success_url: `https://app.libreride.com/payment-success?ride_id=${body.rideId}`,
+    cancel_url: `https://app.libreride.com/payment-cancelled?ride_id=${body.rideId}`,
   });
 
   return json({ url: session.url }, 200, env);
@@ -54,6 +54,10 @@ export async function createPrepaidRideCheckout(
     riderEmail?: string;
     pickupAddress?: string;
     destinationAddress?: string;
+    pickupLat?: number;
+    pickupLng?: number;
+    destinationLat?: number;
+    destinationLng?: number;
     amountCents?: number;
   };
 
@@ -70,6 +74,11 @@ export async function createPrepaidRideCheckout(
     );
   }
 
+  const pickupLat = Number.isFinite(body.pickupLat) ? body.pickupLat : 25.7959;
+  const pickupLng = Number.isFinite(body.pickupLng) ? body.pickupLng : -80.2906;
+  const destinationLat = Number.isFinite(body.destinationLat) ? body.destinationLat : 25.7617;
+  const destinationLng = Number.isFinite(body.destinationLng) ? body.destinationLng : -80.1918;
+
   const rideResponse = await fetch(`${env.SUPABASE_URL}/rest/v1/rides`, {
     method: 'POST',
     headers: {
@@ -83,14 +92,16 @@ export async function createPrepaidRideCheckout(
       status: 'payment_pending',
       pickup_address: body.pickupAddress,
       destination_address: body.destinationAddress,
-      pickup_location: 'POINT(-80.2906 25.7959)',
-      destination_location: 'POINT(-80.1918 25.7617)',
-      pickup_lat: 25.7959,
-      pickup_lng: -80.2906,
-      destination_lat: 25.7617,
-      destination_lng: -80.1918,
+      pickup_location: `POINT(${pickupLng} ${pickupLat})`,
+      destination_location: `POINT(${destinationLng} ${destinationLat})`,
+      pickup_lat: pickupLat,
+      pickup_lng: pickupLng,
+      destination_lat: destinationLat,
+      destination_lng: destinationLng,
       estimated_fare_cents: body.amountCents,
       payment_status: 'pending',
+      dispatched_driver_ids: [],
+      dispatch_radius_miles: 10,
     }),
   });
 
@@ -135,8 +146,8 @@ export async function createPrepaidRideCheckout(
       rider_id: body.riderId,
       type: 'prepaid_ride',
     },
-success_url: `https://app.libreride.com/payment-success?ride_id=${ride.id}`,
-cancel_url: `https://app.libreride.com/payment-cancelled?ride_id=${ride.id}`,
+    success_url: `https://app.libreride.com/payment-success?ride_id=${ride.id}`,
+    cancel_url: `https://app.libreride.com/payment-cancelled?ride_id=${ride.id}`,
   });
 
   await fetch(`${env.SUPABASE_URL}/rest/v1/rides?id=eq.${ride.id}`, {
