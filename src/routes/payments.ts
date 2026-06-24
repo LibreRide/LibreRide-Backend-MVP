@@ -16,7 +16,7 @@ export async function createRideCheckout(
   }
 
   const stripe = new Stripe(env.STRIPE_SECRET_KEY, {
-    apiVersion: '2024-06-20',
+    apiVersion: '2025-02-24.acacia',
   });
 
   const session = await stripe.checkout.sessions.create({
@@ -118,7 +118,7 @@ export async function createPrepaidRideCheckout(
   const ride = rideData[0];
 
   const stripe = new Stripe(env.STRIPE_SECRET_KEY, {
-    apiVersion: '2024-06-20',
+    apiVersion: '2025-02-24.acacia',
   });
 
   const session = await stripe.checkout.sessions.create({
