@@ -7,7 +7,7 @@ import { json, notFound } from './lib/http';
 import { createRide, matchRide, rideSocket, updateRideStatus } from './routes/rides';
 import { estimateRide } from './routes/estimate';
 import { goOffline, goOnline, updateDriverLocation, registerDriver } from './routes/drivers';
-import { approveDriver, listPendingDrivers, rejectDriver } from './routes/admin';
+import { adminMe, approveDriver, listPendingDrivers, rejectDriver, suspendDriver } from './routes/admin';
 import { stripeWebhook } from './routes/stripe';
 
 export default {
@@ -95,7 +95,9 @@ export default {
       if (request.method === 'POST' && path === '/api/drivers/register') {
         return registerDriver(request, env);
       }
-
+if (request.method === 'GET' && path === '/api/admin/me') {
+  return adminMe(request, env);
+}
       if (request.method === 'GET' && path === '/api/admin/drivers/pending') {
         return listPendingDrivers(request, env);
       }
@@ -109,7 +111,10 @@ export default {
       if (request.method === 'POST' && reject) {
         return rejectDriver(request, env, reject[1]);
       }
-
+const suspend = path.match(/^\/api\/admin\/drivers\/([^/]+)\/suspend$/);
+if (request.method === 'POST' && suspend) {
+  return suspendDriver(request, env, suspend[1]);
+}
       if (request.method === 'POST' && path === '/api/webhooks/stripe') {
         return stripeWebhook(request, env);
       }
