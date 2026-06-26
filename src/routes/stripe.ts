@@ -3,11 +3,14 @@ import type { Env } from '../types';
 import { json } from '../lib/http';
 import { supabase } from '../lib/supabase';
 
+type RideType = 'regular' | 'xl' | 'premium' | 'premium_xl';
+
 type DispatchRide = {
   id: string;
   pickup_lat: number | string | null;
   pickup_lng: number | string | null;
   dispatch_radius_miles: number | string | null;
+  ride_type: string | null;
 };
 
 type DispatchDriver = {
@@ -16,6 +19,8 @@ type DispatchDriver = {
   current_lng: number | string | null;
   total_trips: number | string | null;
   last_location_update: string | null;
+  approved_service_levels: string[] | null;
+  vehicle_service_status: string | null;
 };
 
 type ActiveRide = {
@@ -25,6 +30,48 @@ type ActiveRide = {
 function toFiniteNumber(value: unknown): number | null {
   const numberValue = Number(value);
   return Number.isFinite(numberValue) ? numberValue : null;
+}
+
+function normalizeRideType(value: string | null | undefined): RideType {
+  if (!value) return 'regular';
+
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace('-', '_')
+    .replace(' ', '_');
+
+  if (normalized === 'xl') return 'xl';
+  if (normalized === 'premium') return 'premium';
+  if (normalized === 'premium_xl') return 'premium_xl';
+
+  return 'regular';
+}
+
+function eligibleServiceLevelsForRide(rideType: RideType): string[] {
+  if (rideType === 'premium_xl') {
+    return ['premium_xl'];
+  }
+
+  if (rideType === 'premium') {
+    return ['premium', 'premium_xl'];
+  }
+
+  if (rideType === 'xl') {
+    return ['xl', 'premium_xl'];
+  }
+
+  return ['regular', 'xl', 'premium', 'premium_xl'];
+}
+
+function driverHasApprovedServiceLevel(
+  driverApprovedLevels: string[] | null,
+  rideType: RideType
+): boolean {
+  const eligibleLevels = eligibleServiceLevelsForRide(rideType);
+  const approvedLevels = driverApprovedLevels || [];
+
+  return approvedLevels.some((level) => eligibleLevels.includes(level));
 }
 
 function distanceMiles(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -48,7 +95,7 @@ async function dispatchNearestDriversToRide(env: Env, rideId: string): Promise<s
 
   const { data: ride, error: rideError } = await sb
     .from('rides')
-    .select('id,pickup_lat,pickup_lng,dispatch_radius_miles')
+    .select('id,pickup_lat,pickup_lng,dispatch_radius_miles,ride_type')
     .eq('id', rideId)
     .single<DispatchRide>();
 
@@ -57,6 +104,7 @@ async function dispatchNearestDriversToRide(env: Env, rideId: string): Promise<s
     return [];
   }
 
+  const rideType = normalizeRideType(ride.ride_type);
   const pickupLat = toFiniteNumber(ride.pickup_lat);
   const pickupLng = toFiniteNumber(ride.pickup_lng);
   const dispatchRadiusMiles = toFiniteNumber(ride.dispatch_radius_miles) || 10;
@@ -90,10 +138,11 @@ async function dispatchNearestDriversToRide(env: Env, rideId: string): Promise<s
 
   const { data: drivers, error: driversError } = await sb
     .from('drivers')
-    .select('id,current_lat,current_lng,total_trips,last_location_update')
+    .select('id,current_lat,current_lng,total_trips,last_location_update,approved_service_levels,vehicle_service_status')
     .eq('is_online', true)
     .eq('availability_status', 'online')
     .eq('onboarding_status', 'approved')
+    .eq('vehicle_service_status', 'approved')
     .returns<DispatchDriver[]>();
 
   if (driversError) {
@@ -103,6 +152,7 @@ async function dispatchNearestDriversToRide(env: Env, rideId: string): Promise<s
 
   const nearbyDrivers = (drivers || [])
     .filter((driver) => !busyDriverIds.has(driver.id))
+    .filter((driver) => driverHasApprovedServiceLevel(driver.approved_service_levels, rideType))
     .map((driver) => {
       const driverLat = toFiniteNumber(driver.current_lat);
       const driverLng = toFiniteNumber(driver.current_lng);
@@ -147,6 +197,12 @@ async function dispatchNearestDriversToRide(env: Env, rideId: string): Promise<s
     console.log('dispatchNearestDriversToRide: ride update failed', updateError.message);
     return [];
   }
+
+  console.log('dispatchNearestDriversToRide: dispatched drivers', {
+    rideId,
+    rideType,
+    dispatchedDriverIds,
+  });
 
   return dispatchedDriverIds;
 }
