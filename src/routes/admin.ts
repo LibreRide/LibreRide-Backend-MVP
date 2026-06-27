@@ -455,5 +455,46 @@ export async function deactivateDriverPermanently(
     },
   });
 
+
   return json({ driver: data }, 200, env);
+}
+export async function createDriverDocumentSignedUrl(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  await requireAdmin(request, env);
+
+  const body = await readJson<{
+    path?: string;
+  }>(request);
+
+  const documentPath = String(body.path || '').trim();
+
+  if (!documentPath) {
+    return json({ error: 'Document path is required.' }, 400, env);
+  }
+
+  if (
+    documentPath.startsWith('http://') ||
+    documentPath.startsWith('https://') ||
+    documentPath.includes('..')
+  ) {
+    return json({ error: 'Invalid document path.' }, 400, env);
+  }
+
+  const sb = supabase(env);
+
+  const { data, error } = await sb.storage
+    .from('driver-documents')
+    .createSignedUrl(documentPath, 300);
+
+  if (error || !data?.signedUrl) {
+    return json(
+      { error: error?.message || 'Could not open document.' },
+      404,
+      env
+    );
+  }
+
+  return json({ signedUrl: data.signedUrl }, 200, env);
 }

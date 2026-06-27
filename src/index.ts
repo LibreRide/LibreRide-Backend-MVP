@@ -21,6 +21,7 @@ import {
   suspendDriver,
   reviewDriverBackgroundCheck,
   deactivateDriverPermanently,
+  createDriverDocumentSignedUrl,
 } from './routes/admin';
 import { stripeWebhook } from './routes/stripe';
 
@@ -165,6 +166,14 @@ if (request.method === 'POST' && backgroundCheck) {
 const deactivatePermanent = path.match(/^\/api\/admin\/drivers\/([^/]+)\/deactivate-permanent$/);
 if (request.method === 'POST' && deactivatePermanent) {
   return deactivateDriverPermanently(request, env, deactivatePermanent[1]);
+}
+
+if (request.method === 'POST' && path === '/api/admin/driver-documents/signed-url') {
+  return createDriverDocumentSignedUrl(request, env);
+}
+
+if (request.method === 'POST' && path === '/api/webhooks/stripe') {
+  return stripeWebhook(request, env);
 }
 
       return json({ error: message }, status, env);
