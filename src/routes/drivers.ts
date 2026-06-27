@@ -82,6 +82,235 @@ export async function goOffline(request: Request, env: Env): Promise<Response> {
 
   return json({ driver: data }, 200, env);
 }
+type DriverIdentityBody = {
+  ssn?: string;
+};
+
+function normalizeSsn(value: string): string {
+  return value.replace(/\D/g, '');
+}
+
+async function hmacSha256Hex(secret: string, message: string): Promise<string> {
+  const encoder = new TextEncoder();
+
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(message));
+
+  return Array.from(new Uint8Array(signature))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function getAuthUserFromRequest(request: Request, env: Env) {
+  const authorization = request.headers.get('authorization');
+
+  if (!authorization?.startsWith('Bearer ')) {
+    throw new Error('Unauthorized');
+  }
+
+  const token = authorization.slice('Bearer '.length);
+  const sb = supabase(env);
+
+  const { data, error } = await sb.auth.getUser(token);
+
+  if (error || !data.user) {
+    throw new Error('Unauthorized');
+  }
+
+  return data.user;
+}
+
+export async function verifyDriverIdentity(request: Request, env: Env): Promise<Response> {
+  const authUser = await getAuthUserFromRequest(request, env);
+  const body = await readJson<DriverIdentityBody>(request);
+  const cleanSsn = normalizeSsn(body.ssn || '');
+
+  if (cleanSsn.length !== 9) {
+    return json({ error: 'A valid 9-digit Social Security number is required.' }, 400, env);
+  }
+
+  if (!env.SSN_HASH_SECRET) {
+    return json({ error: 'Identity verification is not configured.' }, 500, env);
+  }
+
+  const ssnHash = await hmacSha256Hex(env.SSN_HASH_SECRET, cleanSsn);
+  const ssnLast4 = cleanSsn.slice(-4);
+  const now = new Date().toISOString();
+  const sb = supabase(env);
+
+  const { data: driver, error: driverError } = await sb
+    .from('drivers')
+    .upsert(
+      {
+        user_id: authUser.id,
+        email: authUser.email,
+      },
+      { onConflict: 'user_id' }
+    )
+    .select('*')
+    .single();
+
+  if (driverError || !driver) {
+    return json({ error: driverError?.message || 'Driver profile not found.' }, 500, env);
+  }
+
+  const { data: existingIdentity, error: identityReadError } = await sb
+    .from('driver_identity_registry')
+    .select('*')
+    .eq('ssn_hash', ssnHash)
+    .maybeSingle();
+
+  if (identityReadError) {
+    return json({ error: identityReadError.message }, 500, env);
+  }
+
+  if (existingIdentity) {
+    const sameDriver =
+      existingIdentity.driver_id === driver.id || existingIdentity.user_id === authUser.id;
+
+    if (
+      existingIdentity.status === 'deactivated_permanent' ||
+      existingIdentity.status === 'blocked'
+    ) {
+      await sb
+        .from('drivers')
+        .update({
+          identity_verification_status: 'deactivated_permanent',
+          identity_registry_id: existingIdentity.id,
+          ssn_last4: ssnLast4,
+          duplicate_flag: true,
+          duplicate_reason:
+            'This identity was previously deactivated and cannot create another LibreRide driver account.',
+          duplicate_detected_at: now,
+          deactivation_status: 'deactivated_permanent',
+          deactivated_at: now,
+          is_online: false,
+          availability_status: 'offline',
+        })
+        .eq('id', driver.id);
+
+      return json(
+        {
+          blocked: true,
+          identityStatus: 'deactivated_permanent',
+          error:
+            'This identity was previously deactivated and cannot create another LibreRide driver account.',
+        },
+        403,
+        env
+      );
+    }
+
+    if (!sameDriver) {
+      await sb
+        .from('drivers')
+        .update({
+          identity_verification_status: 'duplicate_review',
+          identity_registry_id: existingIdentity.id,
+          ssn_last4: ssnLast4,
+          duplicate_flag: true,
+          duplicate_reason:
+            'This identity is already connected to another LibreRide driver account.',
+          duplicate_detected_at: now,
+          is_online: false,
+          availability_status: 'offline',
+        })
+        .eq('id', driver.id);
+
+      return json(
+        {
+          blocked: true,
+          identityStatus: 'duplicate_review',
+          error:
+            'This identity is already connected to another LibreRide driver account. Your application has been flagged for review.',
+        },
+        409,
+        env
+      );
+    }
+
+    const { data: updatedDriver, error: updateError } = await sb
+      .from('drivers')
+      .update({
+        identity_verification_status: 'cleared',
+        identity_registry_id: existingIdentity.id,
+        ssn_last4: ssnLast4,
+        duplicate_flag: false,
+        duplicate_reason: null,
+        duplicate_detected_at: null,
+      })
+      .eq('id', driver.id)
+      .select('*')
+      .single();
+
+    if (updateError) {
+      return json({ error: updateError.message }, 500, env);
+    }
+
+    return json(
+      {
+        ok: true,
+        identityStatus: 'cleared',
+        ssnLast4,
+        driver: updatedDriver,
+      },
+      200,
+      env
+    );
+  }
+
+  const { data: newIdentity, error: insertError } = await sb
+    .from('driver_identity_registry')
+    .insert({
+      driver_id: driver.id,
+      user_id: authUser.id,
+      ssn_hash: ssnHash,
+      ssn_last4: ssnLast4,
+      status: 'cleared',
+    })
+    .select('*')
+    .single();
+
+  if (insertError) {
+    return json({ error: insertError.message }, 500, env);
+  }
+
+  const { data: updatedDriver, error: updateError } = await sb
+    .from('drivers')
+    .update({
+      identity_verification_status: 'cleared',
+      identity_registry_id: newIdentity.id,
+      ssn_last4: ssnLast4,
+      duplicate_flag: false,
+      duplicate_reason: null,
+      duplicate_detected_at: null,
+    })
+    .eq('id', driver.id)
+    .select('*')
+    .single();
+
+  if (updateError) {
+    return json({ error: updateError.message }, 500, env);
+  }
+
+  return json(
+    {
+      ok: true,
+      identityStatus: 'cleared',
+      ssnLast4,
+      driver: updatedDriver,
+    },
+    200,
+    env
+  );
+}
 export async function registerDriver(request: Request, env: Env): Promise<Response> {
   const body = await request.json() as any;
 

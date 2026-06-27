@@ -3,6 +3,7 @@ export interface Env {
   CORS_ORIGIN: string;
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
+  SSN_HASH_SECRET: string;
   STRIPE_SECRET_KEY: string;
   STRIPE_PRICE_ID: string;
   STRIPE_WEBHOOK_SECRET: string;

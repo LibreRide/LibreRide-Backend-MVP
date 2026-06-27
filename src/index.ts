@@ -6,8 +6,22 @@ import type { Env } from './types';
 import { json, notFound } from './lib/http';
 import { createRide, matchRide, rideSocket, updateRideStatus } from './routes/rides';
 import { estimateRide } from './routes/estimate';
-import { goOffline, goOnline, updateDriverLocation, registerDriver } from './routes/drivers';
-import { adminMe, approveDriver, listPendingDrivers, rejectDriver, suspendDriver } from './routes/admin';
+import {
+  goOffline,
+  goOnline,
+  updateDriverLocation,
+  registerDriver,
+  verifyDriverIdentity,
+} from './routes/drivers';
+import {
+  adminMe,
+  approveDriver,
+  listPendingDrivers,
+  rejectDriver,
+  suspendDriver,
+  reviewDriverBackgroundCheck,
+  deactivateDriverPermanently,
+} from './routes/admin';
 import { stripeWebhook } from './routes/stripe';
 
 export default {
@@ -95,6 +109,9 @@ export default {
       if (request.method === 'POST' && path === '/api/drivers/register') {
         return registerDriver(request, env);
       }
+if (request.method === 'POST' && path === '/api/drivers/identity-check') {
+  return verifyDriverIdentity(request, env);
+}
 if (request.method === 'GET' && path === '/api/admin/me') {
   return adminMe(request, env);
 }
@@ -140,6 +157,15 @@ if (request.method === 'POST' && suspend) {
           : message === 'Forbidden'
             ? 403
             : 500;
+const backgroundCheck = path.match(/^\/api\/admin\/drivers\/([^/]+)\/background-check$/);
+if (request.method === 'POST' && backgroundCheck) {
+  return reviewDriverBackgroundCheck(request, env, backgroundCheck[1]);
+}
+
+const deactivatePermanent = path.match(/^\/api\/admin\/drivers\/([^/]+)\/deactivate-permanent$/);
+if (request.method === 'POST' && deactivatePermanent) {
+  return deactivateDriverPermanently(request, env, deactivatePermanent[1]);
+}
 
       return json({ error: message }, status, env);
     }

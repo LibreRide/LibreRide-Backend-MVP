@@ -228,7 +228,39 @@ export async function suspendDriver(
   const reason = body.reason || body.notes || 'Suspended by admin';
   const now = new Date().toISOString();
   const sb = supabase(env);
+  const { data: currentDriver, error: readError } = await sb
+    .from('drivers')
+    .select('*')
+    .eq('id', driverId)
+    .maybeSingle();
 
+  if (readError || !currentDriver) {
+    return json({ error: 'Driver not found' }, 404, env);
+  }
+
+  if (currentDriver.deactivation_status === 'deactivated_permanent') {
+    return json(
+      { error: 'This driver has been permanently deactivated and cannot be approved.' },
+      403,
+      env
+    );
+  }
+
+  if (currentDriver.identity_verification_status !== 'cleared') {
+    return json(
+      { error: 'Driver identity must be cleared before approval.' },
+      403,
+      env
+    );
+  }
+
+  if (currentDriver.background_check_status !== 'passed') {
+    return json(
+      { error: 'Background check must be marked as passed before approval.' },
+      403,
+      env
+    );
+  }
   const { data, error } = await sb
     .from('drivers')
     .update({
@@ -250,6 +282,171 @@ export async function suspendDriver(
   await sb.from('admin_audit_logs').insert({
     admin_user_id: admin.id,
     action: 'suspend_driver_vehicle_service',
+    target_type: 'driver',
+    target_id: driverId,
+    metadata: {
+      reason,
+      notes: body.notes || null,
+    },
+  });
+
+  return json({ driver: data }, 200, env);
+}
+export async function reviewDriverBackgroundCheck(
+  request: Request,
+  env: Env,
+  driverId: string
+): Promise<Response> {
+  const admin = await requireAdmin(request, env);
+
+  const body = await readJson<{
+    status?: string;
+    notes?: string;
+  }>(request);
+
+  const status = String(body.status || '').trim().toLowerCase();
+  const allowedStatuses = ['pending', 'passed', 'failed'];
+
+  if (!allowedStatuses.includes(status)) {
+    return json(
+      { error: 'Background check status must be pending, passed, or failed.' },
+      400,
+      env
+    );
+  }
+
+  const now = new Date().toISOString();
+  const sb = supabase(env);
+
+  const updates: Record<string, unknown> = {
+    background_check_status: status,
+    background_check_notes: body.notes || null,
+    background_check_reviewed_at: now,
+    background_check_reviewed_by: admin.id,
+    is_online: false,
+    availability_status: 'offline',
+  };
+
+  if (status === 'failed') {
+    updates.onboarding_status = 'rejected';
+    updates.rejected_at = now;
+    updates.rejection_reason = body.notes || 'Background check failed';
+    updates.vehicle_service_status = 'rejected';
+    updates.approved_service_levels = [];
+    updates.vehicle_rejected_at = now;
+    updates.vehicle_rejection_reason = body.notes || 'Background check failed';
+  }
+
+  const { data, error } = await sb
+    .from('drivers')
+    .update(updates)
+    .eq('id', driverId)
+    .select('*')
+    .single();
+
+  if (error) {
+    return json({ error: error.message }, 500, env);
+  }
+
+  await sb.from('admin_audit_logs').insert({
+    admin_user_id: admin.id,
+    action: 'review_driver_background_check',
+    target_type: 'driver',
+    target_id: driverId,
+    metadata: {
+      status,
+      notes: body.notes || null,
+    },
+  });
+
+  return json({ driver: data }, 200, env);
+}
+
+export async function deactivateDriverPermanently(
+  request: Request,
+  env: Env,
+  driverId: string
+): Promise<Response> {
+  const admin = await requireAdmin(request, env);
+
+  const body = await readJson<{
+    reason?: string;
+    notes?: string;
+  }>(request);
+
+  const reason = body.reason || body.notes || 'Permanently deactivated by admin';
+  const now = new Date().toISOString();
+  const sb = supabase(env);
+
+  const { data: currentDriver, error: readError } = await sb
+    .from('drivers')
+    .select('*')
+    .eq('id', driverId)
+    .maybeSingle();
+
+  if (readError || !currentDriver) {
+    return json({ error: 'Driver not found' }, 404, env);
+  }
+
+  const { data, error } = await sb
+    .from('drivers')
+    .update({
+      onboarding_status: 'rejected',
+      rejected_at: now,
+      rejection_reason: reason,
+      suspended_at: now,
+      deactivation_status: 'deactivated_permanent',
+      deactivated_at: now,
+      deactivation_reason: reason,
+      identity_verification_status: 'deactivated_permanent',
+      duplicate_flag: true,
+      duplicate_reason:
+        'This driver identity has been permanently deactivated and cannot create another account.',
+      duplicate_detected_at: now,
+      vehicle_service_status: 'suspended',
+      approved_service_levels: [],
+      vehicle_service_notes: reason,
+      vehicle_suspended_at: now,
+      background_check_status: 'failed',
+      background_check_notes: reason,
+      background_check_reviewed_at: now,
+      background_check_reviewed_by: admin.id,
+      is_online: false,
+      availability_status: 'offline',
+    })
+    .eq('id', driverId)
+    .select('*')
+    .single();
+
+  if (error) {
+    return json({ error: error.message }, 500, env);
+  }
+
+  if (currentDriver.identity_registry_id) {
+    await sb
+      .from('driver_identity_registry')
+      .update({
+        status: 'deactivated_permanent',
+        blocked_reason: reason,
+        blocked_at: now,
+        updated_at: now,
+      })
+      .eq('id', currentDriver.identity_registry_id);
+  } else {
+    await sb
+      .from('driver_identity_registry')
+      .update({
+        status: 'deactivated_permanent',
+        blocked_reason: reason,
+        blocked_at: now,
+        updated_at: now,
+      })
+      .eq('driver_id', driverId);
+  }
+
+  await sb.from('admin_audit_logs').insert({
+    admin_user_id: admin.id,
+    action: 'permanently_deactivate_driver',
     target_type: 'driver',
     target_id: driverId,
     metadata: {
