@@ -133,6 +133,23 @@ const suspend = path.match(/^\/api\/admin\/drivers\/([^/]+)\/suspend$/);
 if (request.method === 'POST' && suspend) {
   return suspendDriver(request, env, suspend[1]);
 }
+const backgroundCheck = path.match(/^\/api\/admin\/drivers\/([^/]+)\/background-check$/);
+if (request.method === 'POST' && backgroundCheck) {
+  return reviewDriverBackgroundCheck(request, env, backgroundCheck[1]);
+}
+
+const deactivatePermanent = path.match(/^\/api\/admin\/drivers\/([^/]+)\/deactivate-permanent$/);
+if (request.method === 'POST' && deactivatePermanent) {
+  return deactivateDriverPermanently(request, env, deactivatePermanent[1]);
+}
+
+if (request.method === 'POST' && path === '/api/admin/driver-documents/signed-url') {
+  return createDriverDocumentSignedUrl(request, env);
+}
+
+if (request.method === 'POST' && path === '/api/webhooks/stripe') {
+  return stripeWebhook(request, env);
+}
       if (request.method === 'POST' && path === '/api/webhooks/stripe') {
         return stripeWebhook(request, env);
       }
@@ -158,23 +175,6 @@ if (request.method === 'POST' && suspend) {
           : message === 'Forbidden'
             ? 403
             : 500;
-const backgroundCheck = path.match(/^\/api\/admin\/drivers\/([^/]+)\/background-check$/);
-if (request.method === 'POST' && backgroundCheck) {
-  return reviewDriverBackgroundCheck(request, env, backgroundCheck[1]);
-}
-
-const deactivatePermanent = path.match(/^\/api\/admin\/drivers\/([^/]+)\/deactivate-permanent$/);
-if (request.method === 'POST' && deactivatePermanent) {
-  return deactivateDriverPermanently(request, env, deactivatePermanent[1]);
-}
-
-if (request.method === 'POST' && path === '/api/admin/driver-documents/signed-url') {
-  return createDriverDocumentSignedUrl(request, env);
-}
-
-if (request.method === 'POST' && path === '/api/webhooks/stripe') {
-  return stripeWebhook(request, env);
-}
 
       return json({ error: message }, status, env);
     }
